@@ -1,0 +1,82 @@
+services:
+
+  broker_a:
+    build: ./broker
+    command: python broker.py setor_a
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "5001:5001"
+      - "6001:6001"
+      - "7001:7001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',5001)); s.close()"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  broker_b:
+    build: ./broker
+    command: python broker.py setor_b
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "5002:5002"
+      - "6002:6002"
+      - "7002:7002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',5002)); s.close()"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  broker_c:
+    build: ./broker
+    command: python broker.py setor_c
+    environment:
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "5003:5003"
+      - "6003:6003"
+      - "7003:7003"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.connect(('localhost',5003)); s.close()"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  drone_1:
+    build: ./drone
+    command: python drone.py drone_1
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      broker_a:
+        condition: service_healthy
+
+  drone_2:
+    build: ./drone
+    command: python drone.py drone_2
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      broker_b:
+        condition: service_healthy
+
+  sensor_a:
+    build: ./sensor
+    command: python sensor.py setor_a
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      broker_a:
+        condition: service_healthy
+
+  sensor_b:
+    build: ./sensor
+    command: python sensor.py setor_b
+    environment:
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      broker_b:
+        condition: service_healthy
