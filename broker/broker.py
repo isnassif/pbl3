@@ -5,11 +5,21 @@ import json
 import sys
 import time
 import uuid
+import os
+
+
+def _parse_broker_env(key, default_host, default_port):
+    val = os.getenv(key)  # ex: "192.168.1.10:5001"
+    if val:
+        host, port = val.rsplit(":", 1)
+        return (host, int(port))
+    return (default_host, default_port)
+
 
 BROKERS = {
-    "setor_a": ("broker_a", 5001),
-    "setor_b": ("broker_b", 5002),
-    "setor_c": ("broker_c", 5003),
+    "setor_a": _parse_broker_env("BROKER_A", "127.0.0.1", 5001),
+    "setor_b": _parse_broker_env("BROKER_B", "127.0.0.1", 5002),
+    "setor_c": _parse_broker_env("BROKER_C", "127.0.0.1", 5003),
 }
 
 PORTAS_DRONES = {
@@ -24,6 +34,8 @@ PORTAS_SENSORES = {
     "setor_c": 7003,
 }
 
+PRIORIDADE_LABEL = {1: "BAIXA", 2: "MÉDIA", 3: "ALTA"}
+
 
 class Broker:
     def __init__(self, meu_id):
@@ -37,29 +49,37 @@ class Broker:
         self.fila = []
         self.ra = RicartAgrawala(meu_id, BROKERS, self)
 
+    # ─── DISPLAY ──────────────────────────────────────────────────────────────
+
+    def _log(self, msg):
+        print(f"[{self.meu_id}] {msg}")
+
     def mostrarFila(self, evento="ATUALIZAÇÃO"):
-        print("\n")
-        print("=" * 60)
-        print(f"[{self.meu_id}] FILA COMPARTILHADA -> {evento}")
-        print("=" * 60)
+        print()
+        print(f"  ┌{'─' * 58}┐")
+        print(f"  │ {'FILA COMPARTILHADA':^56} │")
+        print(f"  │ evento : {evento:<47} │")
+        print(f"  │ broker : {self.meu_id:<47} │")
+        print(f"  ├{'─' * 4}┬{'─' * 22}┬{'─' * 10}┬{'─' * 18}┤")
+        print(f"  │ {'#':^2} │ {'OCORRÊNCIA':^20} │ {'PRIOR.':^8} │ {'ORIGEM':^16} │")
+        print(f"  ├{'─' * 4}┼{'─' * 22}┼{'─' * 10}┼{'─' * 18}┤")
 
         if not self.fila:
-            print("FILA VAZIA")
+            print(f"  │ {'FILA VAZIA':^56} │")
         else:
             for i, r in enumerate(self.fila, start=1):
+                pri_label = PRIORIDADE_LABEL.get(r['prioridade'], str(r['prioridade']))
                 print(
-                    f"{i}. "
-                    f"{r['ocorrencia']} | "
-                    f"P{r['prioridade']} | "
-                    f"{r['origem']}"
+                    f"  │ {i:^2} │ {r['ocorrencia']:^20} │ "
+                    f"{pri_label:^8} │ {r['origem']:^16} │"
                 )
 
-        print("=" * 60)
+        print(f"  └{'─' * 4}┴{'─' * 22}┴{'─' * 10}┴{'─' * 18}┘")
+        print()
 
     # ─── BROADCAST HELPERS ────────────────────────────────────────────────────
 
     def broadcast_update(self, drone_id, status, owner, in_use_by):
-        """Avisa todos os outros brokers sobre mudança de estado de um drone."""
         msg = {
             "type": "DRONE_UPDATE",
             "drone_id": drone_id,
@@ -80,7 +100,6 @@ class Broker:
                 pass
 
     def _broadcast_fila(self, req_id, ocorrencia, prioridade, timestamp):
-        """Sincroniza a fila de requisições com os outros brokers."""
         msg = {
             "type": "FILA_REQUISICAO",
             "req_id": req_id,
@@ -102,7 +121,6 @@ class Broker:
                 pass
 
     def _broadcast_fila_removida(self, req_id):
-        """Avisa todos que uma requisição da fila foi atendida (por req_id)."""
         msg = {
             "type": "FILA_REMOVIDA",
             "req_id": req_id
@@ -120,11 +138,6 @@ class Broker:
                 pass
 
     def _sincronizarFila(self):
-        """
-        Ao iniciar (ou reiniciar), pede a fila atual para cada peer ativo.
-        Cada resposta é tratada pelo RicartAgrawala via FILA_SYNC_RESPONSE,
-        que faz merge por req_id evitando duplicatas.
-        """
         msg = {
             "type": "FILA_SYNC_REQUEST",
             "broker_id": self.meu_id
@@ -138,9 +151,16 @@ class Broker:
                 sock.connect(endereco)
                 sock.sendall(json.dumps(msg).encode())
                 sock.close()
-                print(f"[{self.meu_id}] sync solicitada para {broker_id}")
+                self._log(f"sync solicitada → {broker_id}")
             except:
-                print(f"[{self.meu_id}] {broker_id} indisponível para sync")
+                self._log(f"sync falhou     → {broker_id} (offline)")
+
+    def _syncInicial(self):
+        for i in range(3):
+            time.sleep(3)
+            self._log(f"sync inicial {i + 1}/3...")
+            self._sincronizarFila()
+        self._log("sync inicial concluída.")
 
     # ─── DESPACHO DE DRONES ───────────────────────────────────────────────────
 
@@ -182,10 +202,13 @@ class Broker:
                         self.drones[drone_id]["in_use_by"] = None
                     drone_encontrado = False
 
+                motivo = "nenhum drone livre" if not drone_encontrado else "fila não vazia"
+                self._log(f"SC: enfileirando '{ocorrencia}' ({motivo})")
+
                 with self.lock_fila:
                     self.fila.append(req)
                     self.fila.sort(key=lambda r: (-r["prioridade"], r["timestamp"], r["req_id"]))
-                    self.mostrarFila("REQUISIÇÃO ADICIONADA")
+                    self.mostrarFila(f"NOVA REQUISIÇÃO — {ocorrencia.upper()} | P{prioridade} {PRIORIDADE_LABEL[prioridade]}")
 
                 self.ra.liberarRecurso()
                 self._broadcast_fila(req_id, ocorrencia, prioridade, ts)
@@ -193,15 +216,18 @@ class Broker:
 
             self.ra.liberarRecurso()
 
+            self._log(f"DRONE {drone_id} → despachado para '{ocorrencia}' | dono: {dono}")
             self.broadcast_update(drone_id, 1, dono, self.meu_id)
             dispatch = {"type": "DISPATCH", "ocorrencia": ocorrencia}
             if conn:
                 try:
                     conn.sendall(json.dumps(dispatch).encode())
                 except:
+                    self._log(f"ERRO: falha ao enviar dispatch para drone {drone_id}")
                     with self.lock_drones:
                         self.drones[drone_id]["status"] = 0
                         self.drones[drone_id]["in_use_by"] = None
+                        self.drones[drone_id]["ocorrencia_atual"] = None
             else:
                 msg = {"type": "EXECUTE", "drone_id": drone_id, "ocorrencia": ocorrencia}
                 try:
@@ -211,9 +237,11 @@ class Broker:
                     sock.sendall(json.dumps(msg).encode())
                     sock.close()
                 except:
+                    self._log(f"ERRO: falha ao enviar EXECUTE para broker {dono}")
                     with self.lock_drones:
                         self.drones[drone_id]["status"] = 0
                         self.drones[drone_id]["in_use_by"] = None
+                        self.drones[drone_id]["ocorrencia_atual"] = None
 
     def _atenderFila(self):
         with self.lock_fila:
@@ -236,6 +264,7 @@ class Broker:
                     break
 
         if drone_id is None:
+            self._log("atenderFila: nenhum drone disponível no momento")
             return False
 
         with self.lock_fila:
@@ -245,7 +274,20 @@ class Broker:
                     self.drones[drone_id]["in_use_by"] = None
                 return False
             self.fila.pop(0)
-            self.mostrarFila(f"ATENDIDA -> {req['ocorrencia']}")
+            with self.lock_drones:
+                if drone_id in self.drones:
+                    self.drones[drone_id]["ocorrencia_atual"] = req
+            self.mostrarFila(f"ATENDIDA — {req['ocorrencia'].upper()} | drone: {drone_id}")
+
+        self._log(
+            f"DRONE {drone_id} → em missão: '{req['ocorrencia']}' "
+            f"| P{req['prioridade']} {PRIORIDADE_LABEL[req['prioridade']]} "
+            f"| origem: {req['origem']}"
+        )
+        self._log(
+            f"  ↳ req_id: {req['req_id']} "
+            f"(se este drone cair, esta requisição voltará à fila)"
+        )
 
         self.broadcast_update(drone_id, 1, dono, self.meu_id)
         self._broadcast_fila_removida(req["req_id"])
@@ -255,9 +297,11 @@ class Broker:
             try:
                 conn.sendall(json.dumps(dispatch).encode())
             except:
+                self._log(f"ERRO: falha ao enviar dispatch para drone {drone_id}")
                 with self.lock_drones:
                     self.drones[drone_id]["status"] = 0
                     self.drones[drone_id]["in_use_by"] = None
+                    self.drones[drone_id]["ocorrencia_atual"] = None
         else:
             msg = {"type": "EXECUTE", "drone_id": drone_id, "ocorrencia": req["ocorrencia"]}
             try:
@@ -267,9 +311,11 @@ class Broker:
                 sock.sendall(json.dumps(msg).encode())
                 sock.close()
             except:
+                self._log(f"ERRO: falha ao enviar EXECUTE para broker {dono}")
                 with self.lock_drones:
                     self.drones[drone_id]["status"] = 0
                     self.drones[drone_id]["in_use_by"] = None
+                    self.drones[drone_id]["ocorrencia_atual"] = None
 
         return True
 
@@ -303,8 +349,10 @@ class Broker:
                         "status": 0,
                         "owner": self.meu_id,
                         "in_use_by": None,
-                        "conn": client_socket
+                        "conn": client_socket,
+                        "ocorrencia_atual": None
                     }
+                self._log(f"DRONE CONECTADO → {drone_id} (registrado em {self.meu_id})")
                 time.sleep(0.5)
                 self.broadcast_update(drone_id, 0, self.meu_id, None)
                 threading.Thread(
@@ -338,17 +386,60 @@ class Broker:
                 drone = json.loads(data.decode())
                 if drone.get("type") == "CONCLUIDO":
                     with self.lock_drones:
+                        missao = self.drones[drone_id].get("ocorrencia_atual")
                         self.drones[drone_id]["status"] = 0
                         self.drones[drone_id]["in_use_by"] = None
+                        self.drones[drone_id]["ocorrencia_atual"] = None
+                    ocorrencia_str = missao["ocorrencia"] if missao else "?"
+                    self._log(
+                        f"DRONE {drone_id} → missão '{ocorrencia_str}' CONCLUÍDA ✓ "
+                        f"— drone disponível novamente"
+                    )
                     self.broadcast_update(drone_id, 0, self.drones[drone_id]["owner"], None)
                     self._processarFila()
             except:
                 break
 
+        # ── drone desconectou ──
+        req_perdida = None
         with self.lock_drones:
-            self.drones.pop(drone_id, None)
-        print(f"\n[{self.meu_id}] DRONE DESCONECTADO -> {drone_id}")
-        self.mostrarFila("APÓS DESCONECTAR DRONE")
+            info = self.drones.pop(drone_id, None)
+            if info and info.get("ocorrencia_atual"):
+                req_perdida = info["ocorrencia_atual"]
+
+        print()
+        print(f"  ╔{'═' * 56}╗")
+        if req_perdida:
+            print(f"  ║ {'⚠  DRONE CAIU DURANTE MISSÃO':^54} ║")
+            print(f"  ╠{'═' * 56}╣")
+            print(f"  ║  drone      : {drone_id:<40} ║")
+            print(f"  ║  ocorrência : {req_perdida['ocorrencia']:<40} ║")
+            pri = req_perdida['prioridade']
+            print(f"  ║  prioridade : P{pri} {PRIORIDADE_LABEL[pri]:<37} ║")
+            print(f"  ║  origem     : {req_perdida['origem']:<40} ║")
+            print(f"  ║  req_id     : {req_perdida['req_id']:<40} ║")
+            print(f"  ╠{'═' * 56}╣")
+            print(f"  ║  {'→ REQUISIÇÃO DEVOLVIDA À FILA':^54} ║")
+            print(f"  ║  {'outros brokers serão notificados':^54} ║")
+        else:
+            print(f"  ║ {'DRONE DESCONECTADO (sem missão ativa)':^54} ║")
+            print(f"  ╠{'═' * 56}╣")
+            print(f"  ║  drone : {drone_id:<46} ║")
+        print(f"  ╚{'═' * 56}╝")
+        print()
+
+        if req_perdida:
+            with self.lock_fila:
+                self.fila.insert(0, req_perdida)
+                self.fila.sort(key=lambda r: (-r["prioridade"], r["timestamp"], r["req_id"]))
+                self.mostrarFila(f"RECUPERAÇÃO — '{req_perdida['ocorrencia']}' voltou à fila")
+            self._broadcast_fila(
+                req_perdida["req_id"],
+                req_perdida["ocorrencia"],
+                req_perdida["prioridade"],
+                req_perdida["timestamp"]
+            )
+            self._log("broadcast enviado — outros brokers atualizaram a fila")
 
     # ─── CONEXÃO COM SENSORES ─────────────────────────────────────────────────
 
@@ -371,13 +462,17 @@ class Broker:
             msg = json.loads(data.decode())
             ocorrencia = msg["ocorrencia"]
             prioridade = msg["prioridade"]
+            self._log(
+                f"SENSOR → '{ocorrencia}' "
+                f"| P{prioridade} {PRIORIDADE_LABEL[prioridade]}"
+            )
             threading.Thread(
                 target=self.requisitarDrone,
                 args=(ocorrencia, prioridade),
                 daemon=True
             ).start()
         except Exception as e:
-            print(f"[{self.meu_id}] Erro no sensor: {e}")
+            self._log(f"ERRO no sensor: {e}")
         finally:
             conn.close()
 
@@ -394,21 +489,29 @@ class Broker:
             args=(PORTAS_SENSORES[self.meu_id],),
             daemon=True
         ).start()
-        print(f"[{self.meu_id}] broker iniciado.")
+        threading.Thread(
+            target=self._syncInicial,
+            daemon=True
+        ).start()
 
-        # Aguarda o servidor RA subir e pede sync da fila aos peers
-        time.sleep(1)
-        self._sincronizarFila()
+        print()
+        print(f"  ┌{'─' * 48}┐")
+        print(f"  │ {'BROKER INICIADO':^46} │")
+        print(f"  │ {'setor : ' + self.meu_id:<46} │")
+        print(f"  ├{'─' * 48}┤")
+        for bid, (host, port) in BROKERS.items():
+            marker = "◄ EU" if bid == self.meu_id else "    "
+        print(f"  │  {marker}  {bid} → {host}:{port:<20} │")
+        print(f"  └{'─' * 48}┘")
+        print()
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Uso: python broker.py <setor_a|setor_b|setor_c>")
-        sys.exit(1)
+    meu_id = sys.argv[1] if len(sys.argv) > 1 else os.getenv("MEU_SETOR", "")
 
-    meu_id = sys.argv[1]
-    if meu_id not in BROKERS:
-        print(f"Setor inválido. Escolha entre: {list(BROKERS.keys())}")
+    if not meu_id or meu_id not in BROKERS:
+        print("Uso: python broker.py <setor_a|setor_b|setor_c>")
+        print("  ou: MEU_SETOR=setor_a python broker.py")
         sys.exit(1)
 
     broker = Broker(meu_id)

@@ -2,11 +2,25 @@ import socket
 import json
 import sys
 import time
+import os
+
+def _parse_addr(env_key, default_host, default_port):
+    val = os.getenv(env_key)
+    if val:
+        host, port = val.rsplit(":", 1)
+        return (host, int(port))
+    return (default_host, default_port)
+
+#BROKERS = [
+ #   _parse_addr("BROKER_A", "broker_a", 6001),
+  #  _parse_addr("BROKER_B", "broker_b", 6002),
+   # _parse_addr("BROKER_C", "broker_c", 6003),
+#]
 
 BROKERS = [
-    ("broker_a", 6001),
-    ("broker_b", 6002),
-    ("broker_c", 6003)
+    _parse_addr("BROKER_A", "127.0.0.1", 6001),
+    _parse_addr("BROKER_B", "127.0.0.1", 6002),
+    _parse_addr("BROKER_C", "127.0.0.1", 6003),
 ]
 
 

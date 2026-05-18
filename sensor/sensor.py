@@ -5,12 +5,23 @@ import json
 import sys
 import os
 
-SERVIDOR_HOST = os.getenv("SERVIDOR_HOST", "localhost")
+def _parse_addr(env_key, default_host, default_port):
+    val = os.getenv(env_key)
+    if val:
+        host, port = val.rsplit(":", 1)
+        return (host, int(port))
+    return (default_host, default_port)
+
+#BROKERS_SENSORES = {
+ #   "setor_a": _parse_addr("BROKER_A", "broker_a", 7001),
+  #  "setor_b": _parse_addr("BROKER_B", "broker_b", 7002),
+   # "setor_c": _parse_addr("BROKER_C", "broker_c", 7003),
+#}
 
 BROKERS_SENSORES = {
-    "setor_a": ("broker_a", 7001),
-    "setor_b": ("broker_b", 7002),
-    "setor_c": ("broker_c", 7003),
+    "setor_a": _parse_addr("BROKER_A", "127.0.0.1", 7001),
+    "setor_b": _parse_addr("BROKER_B", "127.0.0.1", 7002),
+    "setor_c": _parse_addr("BROKER_C", "127.0.0.1", 7003),
 }
 
 if len(sys.argv) < 2:
