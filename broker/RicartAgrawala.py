@@ -86,11 +86,34 @@ class RicartAgrawala:
                 "prioridade": message["prioridade"],
                 "timestamp": message["timestamp"]
             }
+
+            adicionou = False
+
             with self.broker_ref.lock_fila:
-                self.broker_ref.fila.append(req)
+
+                ids = {
+                    r["req_id"]
+                    for r in self.broker_ref.fila
+                }
+
+                if req["req_id"] not in ids:
+                    self.broker_ref.fila.append(req)
+                    adicionou = True
+
                 self.broker_ref.fila.sort(
-                    key=lambda r: (-r["prioridade"], r["timestamp"], r["req_id"])
+                    key=lambda r:
+                    (-r["prioridade"],
+                    r["timestamp"],
+                    r["req_id"])
                 )
+
+            if adicionou:
+                self.broker_ref.mostrarFila(
+                    f"NOVA REQUISIÇÃO REMOTA — {req['origem']}"
+                )
+
+                self.broker_ref._processarFila()
+
             return
 
         if msg_type == "FILA_REMOVIDA":
@@ -272,13 +295,26 @@ class RicartAgrawala:
 
     def _handleConnection(self, conn):
         try:
-            data = conn.recv(4096).decode()
+            data = b''
+
+            while True:
+                parte = conn.recv(4096)
+
+                if not parte:
+                    break
+
+                data += parte
+
             if not data:
                 return
-            mensagem = json.loads(data)
+
+            mensagem = json.loads(data.decode())
+
             self._messageReceiver(mensagem)
+
         except Exception as e:
             print(f"[{self.meu_id}] Erro ao tratar conexão: {e}")
+
         finally:
             conn.close()
 

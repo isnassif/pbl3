@@ -6,7 +6,8 @@ import sys
 import time
 import uuid
 import os
-
+import sys
+sys.stdout.reconfigure(line_buffering=True)
 
 def _parse_broker_env(key, default_host, default_port):
     val = os.getenv(key)  # ex: "192.168.1.10:5001"
@@ -501,7 +502,7 @@ class Broker:
         print(f"  ├{'─' * 48}┤")
         for bid, (host, port) in BROKERS.items():
             marker = "◄ EU" if bid == self.meu_id else "    "
-        print(f"  │  {marker}  {bid} → {host}:{port:<20} │")
+            print(f"  │  {marker}  {bid} → {host}:{port:<20} │")
         print(f"  └{'─' * 48}┘")
         print()
 
