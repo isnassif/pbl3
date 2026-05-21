@@ -5,6 +5,7 @@ import time
 import os
 import sys
 
+
 sys.stdout.reconfigure(line_buffering=True)
 def _parse_addr(env_key, default_host, default_port):
     val = os.getenv(env_key)
