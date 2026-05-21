@@ -57,4 +57,4 @@ while True:
     except Exception as e:
         print(f"Erro de conexão: {e}")
 
-    time.sleep(8)
+    time.sleep(20)
