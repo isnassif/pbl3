@@ -123,6 +123,7 @@ class RicartAgrawala:
                     r for r in self.broker_ref.fila
                     if r["req_id"] != req_id
                 ]
+            self.broker_ref.mostrarFila("REQUISIÇÃO ATENDIDA — removida por outro broker")
             return
 
         if msg_type == "BROKER_OFFLINE":
@@ -159,6 +160,22 @@ class RicartAgrawala:
                     key=lambda r: (-r["prioridade"], r["timestamp"], r["req_id"])
                 )
             self.broker_ref.mostrarFila("SYNC RECEBIDA")
+            return
+
+        if msg_type == "BLOCK_NEW":
+            # Recebe a chain completa de outro broker
+            chain_recebida = message.get("chain", [])
+            chain_local = self.broker_ref.blockchain.chain
+
+            # Regra da chain mais longa: adota se for maior e válida
+            if (len(chain_recebida) > len(chain_local) and
+                    self.broker_ref.blockchain.chain_valid(chain_recebida)):
+                self.broker_ref.blockchain.chain = chain_recebida
+                self.broker_ref.token.recalcular_saldos()
+                origem = message.get("broker_id", "?")
+                print(f"[{self.meu_id}] ⛓  chain atualizada ← {origem} "
+                      f"| blocos: {len(chain_recebida)} | saldos recalculados")
+                self.broker_ref._mostrar_blockchain()
             return
 
         # ── Mensagens de controle do Ricart-Agrawala ──

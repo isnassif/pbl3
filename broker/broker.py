@@ -7,6 +7,9 @@ import time
 import uuid
 import os
 import sys
+from blockchain.blockchain import BlockChain
+from blockchain.token import GerenciadorTokens
+
 sys.stdout.reconfigure(line_buffering=True)
 
 def _parse_broker_env(key, default_host, default_port):
@@ -49,11 +52,65 @@ class Broker:
         self.drones = {}
         self.fila = []
         self.ra = RicartAgrawala(meu_id, BROKERS, self)
+        self.blockchain = BlockChain()
+        self.token = GerenciadorTokens(self.blockchain)
+        # Registra emissões iniciais e minera o genesis block
+        self.token.inicializar_saldos()
+        self.blockchain.criar_genesis()
+
+    def _broadcast_bloco(self):
+        """Envia a chain completa para todos os outros brokers após minerar um bloco."""
+        msg = {
+            "type": "BLOCK_NEW",
+            "broker_id": self.meu_id,
+            "chain": self.blockchain.chain
+        }
+        for broker_id, endereco in BROKERS.items():
+            if broker_id == self.meu_id:
+                continue
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                sock.connect(endereco)
+                sock.sendall(json.dumps(msg).encode())
+                sock.close()
+                self._log(f"⛓  bloco #{self.blockchain.chain[-1]['index']} propagado → {broker_id}")
+            except:
+                self._log(f"⛓  propagação falhou → {broker_id} (offline)")
 
     # ─── DISPLAY ──────────────────────────────────────────────────────────────
 
     def _log(self, msg):
         print(f"[{self.meu_id}] {msg}")
+
+    def _mostrar_blockchain(self):
+        """Imprime a blockchain completa com saldos — útil para debug e apresentação."""
+        chain = self.blockchain.chain
+        print()
+        print(f"  ╔{'═'*62}╗")
+        print(f"  ║ {'BLOCKCHAIN — ' + self.meu_id:^60} ║")
+        print(f"  ╠{'═'*62}╣")
+        for bloco in chain:
+            print(f"  ║  Bloco #{bloco['index']} | {bloco['timestamp'][:19]:<19} | hash_ant: {bloco['previous_hash'][:8]}… ║")
+            for tx in bloco['transacoes']:
+                tipo = tx.get('tipo','?')
+                if tipo == 'EMISSAO':
+                    print(f"  ║    💰 EMISSAO  → {tx['empresa']:<10} +{tx['valor']} créditos{' '*18}║")
+                elif tipo == 'PAGAMENTO':
+                    req = tx.get('req_id','')[:8]
+                    print(f"  ║    💸 PAGAMENTO→ {tx['empresa']:<10} -{tx['valor']} créditos | req: {req}…{' '*4}║")
+                elif tipo == 'LAUDO':
+                    print(f"  ║    📋 LAUDO    → drone {tx.get('drone','?'):<6} | {tx.get('ocorrencia','?'):<20}║")
+            if not bloco['transacoes']:
+                print(f"  ║    (bloco vazio){' '*45}║")
+        print(f"  ╠{'═'*62}╣")
+        print(f"  ║  {'SALDOS ATUAIS':^60} ║")
+        for emp, saldo in self.token.saldos.items():
+            barra = '█' * (saldo // 10) + '░' * (10 - saldo // 10)
+            print(f"  ║  {emp:<12} {barra} {saldo:>3} créditos{' '*14}║")
+        print(f"  ║  Chain válida: {'✅ SIM' if self.blockchain.chain_valid(self.blockchain.chain) else '❌ NÃO':<55}║")
+        print(f"  ╚{'═'*62}╝")
+        print()
 
     def mostrarFila(self, evento="ATUALIZAÇÃO"):
         print()
@@ -217,11 +274,23 @@ class Broker:
 
             self.ra.liberarRecurso()
 
+            # monta o objeto de missão para registrar no drone
+            missao = {
+                "req_id": req_id,
+                "ocorrencia": ocorrencia,
+                "origem": self.meu_id,
+                "prioridade": prioridade,
+                "timestamp": ts
+            }
+
             self._log(f"DRONE {drone_id} → despachado para '{ocorrencia}' | dono: {dono}")
             self.broadcast_update(drone_id, 1, dono, self.meu_id)
             dispatch = {"type": "DISPATCH", "ocorrencia": ocorrencia}
             if conn:
                 try:
+                    # registra ANTES de enviar — se o drone cair, o broker sabe a missão
+                    with self.lock_drones:
+                        self.drones[drone_id]["ocorrencia_atual"] = missao
                     conn.sendall(json.dumps(dispatch).encode())
                 except:
                     self._log(f"ERRO: falha ao enviar dispatch para drone {drone_id}")
@@ -232,6 +301,9 @@ class Broker:
             else:
                 msg = {"type": "EXECUTE", "drone_id": drone_id, "ocorrencia": ocorrencia}
                 try:
+                    # registra ANTES de enviar
+                    with self.lock_drones:
+                        self.drones[drone_id]["ocorrencia_atual"] = missao
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(2)
                     sock.connect(BROKERS[dono])
@@ -274,10 +346,13 @@ class Broker:
                     self.drones[drone_id]["status"] = 0
                     self.drones[drone_id]["in_use_by"] = None
                 return False
-            self.fila.pop(0)
+
+            # registra no drone ANTES de remover da fila
             with self.lock_drones:
                 if drone_id in self.drones:
                     self.drones[drone_id]["ocorrencia_atual"] = req
+
+            self.fila.pop(0)
             self.mostrarFila(f"ATENDIDA — {req['ocorrencia'].upper()} | drone: {drone_id}")
 
         self._log(
@@ -391,6 +466,21 @@ class Broker:
                         self.drones[drone_id]["status"] = 0
                         self.drones[drone_id]["in_use_by"] = None
                         self.drones[drone_id]["ocorrencia_atual"] = None
+                    if missao:
+                        self.blockchain.adicionar_transacao({
+                            "tipo": "LAUDO",
+                            "drone": drone_id,
+                            "ocorrencia": missao["ocorrencia"],
+                            "origem": missao["origem"],
+                            "req_id": missao["req_id"]
+                        })
+                        bloco_anterior = self.blockchain.print_previous_block()
+                        proof = self.blockchain.proof_of_work(bloco_anterior['proof'])
+                        hash_anterior = self.blockchain.hash(bloco_anterior)
+                        bloco = self.blockchain.create_block(proof, hash_anterior)
+                        self._log(f"laudo gravado → bloco {bloco['index']} | cadeia válida: {self.blockchain.chain_valid(self.blockchain.chain)}")
+                        self._mostrar_blockchain()
+                        self._broadcast_bloco()
                     ocorrencia_str = missao["ocorrencia"] if missao else "?"
                     self._log(
                         f"DRONE {drone_id} → missão '{ocorrencia_str}' CONCLUÍDA ✓ "
@@ -463,6 +553,46 @@ class Broker:
             msg = json.loads(data.decode())
             ocorrencia = msg["ocorrencia"]
             prioridade = msg["prioridade"]
+            origem = msg.get("origem", self.meu_id)
+            req_id = str(uuid.uuid4())
+            if prioridade == 1:
+                valor_gasto = 2
+            elif prioridade == 2:
+                valor_gasto = 5
+            elif prioridade == 3:
+                valor_gasto = 10
+            else:
+                print("Sem prioridade quebrou")
+                return
+            
+            credito_aceito = self.token.gastar(origem, valor_gasto,ocorrencia,req_id)
+            print("Pendentes:", self.blockchain.transacoes_pendentes)
+            if not credito_aceito:
+                self._log(
+                    f"CRÉDITO NEGADO → {origem} sem saldo suficiente"
+                )
+                return
+            bloco_anterior = self.blockchain.print_previous_block()
+
+            proof = self.blockchain.proof_of_work(
+                bloco_anterior['proof']
+            )
+
+            hash_anterior = self.blockchain.hash(
+                bloco_anterior
+            )
+
+            self.blockchain.create_block(
+                proof,
+                hash_anterior
+            )
+            self._log(
+                f"CRÉDITO OK → {origem} debitado {valor_gasto} créditos "
+                f"(saldo restante: {self.token.consultar_saldo(origem)}) "
+                f"| req_id: {req_id[:8]}…"
+            )
+            self._mostrar_blockchain()
+            self._broadcast_bloco()
             self._log(
                 f"SENSOR → '{ocorrencia}' "
                 f"| P{prioridade} {PRIORIDADE_LABEL[prioridade]}"

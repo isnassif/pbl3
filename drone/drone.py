@@ -16,8 +16,8 @@ def _parse_addr(env_key, default_host, default_port):
 
 #BROKERS = [
 #    _parse_addr("BROKER_A", "broker_a", 6001),
-#    _parse_addr("BROKER_B", "broker_b", 6002),
-#    _parse_addr("BROKER_C", "broker_c", 6003),
+ #   _parse_addr("BROKER_B", "broker_b", 6002),
+  #  _parse_addr("BROKER_C", "broker_c", 6003),
 #]
 
 BROKERS = [

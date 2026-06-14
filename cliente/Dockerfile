@@ -1,9 +1,7 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
 COPY cliente.py .
-
-ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "cliente.py"]

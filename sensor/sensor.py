@@ -13,17 +13,17 @@ def _parse_addr(env_key, default_host, default_port):
         return (host, int(port))
     return (default_host, default_port)
 
-BROKERS_SENSORES = {
-    "setor_a": _parse_addr("BROKER_A", "broker_a", 7001),
-    "setor_b": _parse_addr("BROKER_B", "broker_b", 7002),
-    "setor_c": _parse_addr("BROKER_C", "broker_c", 7003),
-}
-
 #BROKERS_SENSORES = {
- #   "setor_a": _parse_addr("BROKER_A", "127.0.0.1", 7001),
-#    "setor_b": _parse_addr("BROKER_B", "127.0.0.1", 7002),
- #   "setor_c": _parse_addr("BROKER_C", "127.0.0.1", 7003),
+#    "setor_a": _parse_addr("BROKER_A", "broker_a", 7001),
+ #   "setor_b": _parse_addr("BROKER_B", "broker_b", 7002),
+#    "setor_c": _parse_addr("BROKER_C", "broker_c", 7003),
 #}
+
+BROKERS_SENSORES = {
+    "setor_a": _parse_addr("BROKER_A", "127.0.0.1", 7001),
+    "setor_b": _parse_addr("BROKER_B", "127.0.0.1", 7002),
+    "setor_c": _parse_addr("BROKER_C", "127.0.0.1", 7003),
+}
 
 if len(sys.argv) < 2:
     print("Uso: python sensor.py <setor_a|setor_b|setor_c>")
