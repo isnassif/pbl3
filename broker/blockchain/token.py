@@ -1,4 +1,7 @@
 from blockchain.blockchain import BlockChain
+import threading
+
+
 
 class GerenciadorTokens:
 
@@ -8,30 +11,33 @@ class GerenciadorTokens:
             'setor_b': 0,
             'setor_c': 0
         }
-
+        self.lock_token = threading.Lock()
         self.blockchain = blockchain
 
-    def gastar(self, empresa, valor, ocorrencia,req_id):
+    def gastar(self, empresa, valor, ocorrencia, req_id):
 
         if empresa not in self.saldos:
             return False
 
-        if valor <= self.consultar_saldo(empresa):
+        with self.lock_token:
 
-            self.saldos[empresa] -= valor
+            if valor <= self.consultar_saldo(empresa):
 
-            transacao = {
-                'tipo': 'PAGAMENTO',
-                'valor': valor,
-                'empresa': empresa,
-                'ocorrencia': ocorrencia,
-                'req_id': req_id
-            }
-            self.blockchain.adicionar_transacao(transacao)
+                self.saldos[empresa] -= valor
 
-            return True
+                transacao = {
+                    'tipo': 'PAGAMENTO',
+                    'valor': valor,
+                    'empresa': empresa,
+                    'ocorrencia': ocorrencia,
+                    'req_id': req_id
+                }
 
-        return False
+                self.blockchain.adicionar_transacao(transacao)
+
+                return True
+
+            return False
 
     def consultar_saldo(self, empresa):
         return self.saldos.get(empresa, 0)
@@ -78,14 +84,14 @@ class GerenciadorTokens:
         self.emitir_creditos("setor_b", 100)
         self.emitir_creditos("setor_c", 100)
     
+    def recalcular_saldos(self):
+        na=self.recuperar_creditos("setor_a")
+        nb=self.recuperar_creditos("setor_b")
+        nc=self.recuperar_creditos("setor_c")
+
+        self.saldos["setor_a"] = na
+        self.saldos["setor_b"] = nb
+        self.saldos["setor_c"] = nc
 
 
 
-
-bc = BlockChain()
-
-token = GerenciadorTokens(bc)
-
-token.emitir_creditos("empresa A", 100)
-
-print(token.consultar_saldo("empresa A"))
