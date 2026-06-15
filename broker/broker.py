@@ -479,6 +479,24 @@ class Broker:
                         hash_anterior = self.blockchain.hash(bloco_anterior)
                         bloco = self.blockchain.create_block(proof, hash_anterior)
                         self._log(f"laudo gravado → bloco {bloco['index']} | cadeia válida: {self.blockchain.chain_valid(self.blockchain.chain)}")
+                        # TESTE DE ADULTERAÇÃO
+                        if len(self.blockchain.chain) >= 2:
+
+                            print("\n=== TESTE DE ADULTERAÇÃO ===")
+
+                            print(
+                                "Antes:",
+                                self.blockchain.chain_valid(self.blockchain.chain)
+                            )
+
+                            self.blockchain.chain[1]["transacoes"][0]["valor"] = 9999
+
+                            print(
+                                "Depois:",
+                                self.blockchain.chain_valid(self.blockchain.chain)
+                            )
+
+                            print("===========================\n")
                         self._mostrar_blockchain()
                         self._broadcast_bloco()
                     ocorrencia_str = missao["ocorrencia"] if missao else "?"
