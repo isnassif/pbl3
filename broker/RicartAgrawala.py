@@ -23,6 +23,7 @@ class RicartAgrawala:
         self.fila_adiados = []
         self.lock = threading.Lock()
         self.permissao_event = threading.Event()
+        self.lock_blockchain = threading.Lock()
 
         threading.Thread(target=self._receiveMessage, daemon=True).start()
 
@@ -48,6 +49,80 @@ class RicartAgrawala:
         msg_type = message.get("type")
 
         # ── Mensagens de aplicação ──
+
+        if msg_type == "TRANSFERIR":
+            de = message.get("de")
+            para = message.get("para")
+            valor = message.get("valor")
+            assinatura = message.get("assinatura")
+
+            dados = f"{de}:{para}:{valor}"
+
+            if not self.broker_ref.auth.verificar(de, dados, assinatura):
+                self.broker_ref._log(f"⚠ ASSINATURA INVÁLIDA — transferência de {de} rejeitada")
+                return
+
+            sucesso = self.broker_ref.token.transferir(de, para, valor)
+
+            if sucesso:
+                with self.broker_ref.lock_blockchain:
+                    bloco_anterior = self.broker_ref.blockchain.print_previous_block()
+                    proof = self.broker_ref.blockchain.proof_of_work(bloco_anterior['proof'])
+                    hash_anterior = self.broker_ref.blockchain.hash(bloco_anterior)
+                    self.broker_ref.blockchain.create_block(proof, hash_anterior)
+                self.broker_ref._log(f"✅ TRANSFERÊNCIA confirmada: {de} → {para} ({valor} créditos)")
+                self.broker_ref._mostrar_blockchain()
+                self.broker_ref._broadcast_bloco()
+            else:
+                self.broker_ref._log(f"❌ TRANSFERÊNCIA negada: {de} sem saldo suficiente")
+            return
+
+        if msg_type == "CHAIN_REQUEST":
+
+            if self.broker_ref.chain_corrompida:
+                print(
+                    f"[{self.meu_id}] Chain corrompida - ignorando pedido de sincronização"
+                )
+                return
+
+            with self.broker_ref.lock_blockchain:
+
+                resposta = {
+                    "type": "CHAIN_RESPONSE",
+                    "broker_id": self.meu_id,
+                    "chain": list(self.broker_ref.blockchain.chain)
+                }
+
+            self._sendMessage(
+                message["broker_id"],
+                resposta
+            )
+
+            return
+        
+        if msg_type == "CHAIN_RESPONSE":
+
+            if not self.broker_ref.chain_corrompida:
+                return
+
+            chain_recebida = message.get("chain", [])
+
+            if self.broker_ref.blockchain.chain_valid(chain_recebida):
+
+                self.broker_ref.blockchain.chain = chain_recebida
+
+                self.broker_ref.blockchain.salvar_no_disco()
+
+                self.broker_ref.token.recalcular_saldos()
+
+                self.broker_ref.chain_corrompida = False
+
+                print(
+                    f"[{self.meu_id}] Blockchain restaurada "
+                    f"a partir de {message['broker_id']}"
+                )
+
+            return
 
         if msg_type == "DRONE_UPDATE":
             with self.broker_ref.lock_drones:
@@ -163,19 +238,33 @@ class RicartAgrawala:
             return
 
         if msg_type == "BLOCK_NEW":
-            # Recebe a chain completa de outro broker
-            chain_recebida = message.get("chain", [])
-            chain_local = self.broker_ref.blockchain.chain
 
-            # Regra da chain mais longa: adota se for maior e válida
-            if (len(chain_recebida) > len(chain_local) and
-                    self.broker_ref.blockchain.chain_valid(chain_recebida)):
-                self.broker_ref.blockchain.chain = chain_recebida
-                self.broker_ref.token.recalcular_saldos()
-                origem = message.get("broker_id", "?")
-                print(f"[{self.meu_id}] ⛓  chain atualizada ← {origem} "
-                      f"| blocos: {len(chain_recebida)} | saldos recalculados")
-                self.broker_ref._mostrar_blockchain()
+            chain_recebida = message.get("chain", [])
+
+            with self.broker_ref.lock_blockchain:
+
+                chain_local = self.broker_ref.blockchain.chain
+
+                if (
+                    len(chain_recebida) > len(chain_local)
+                    and self.broker_ref.blockchain.chain_valid(chain_recebida)
+                ):
+
+                    self.broker_ref.blockchain.chain = chain_recebida
+
+                    self.broker_ref.blockchain.salvar_no_disco()
+
+                    self.broker_ref.token.recalcular_saldos()
+
+                    origem = message.get("broker_id", "?")
+
+                    print(
+                        f"[{self.meu_id}] ⛓ chain atualizada ← {origem} "
+                        f"| blocos: {len(chain_recebida)} | saldos recalculados | 💾 salvo"
+                    )
+
+                    self.broker_ref._mostrar_blockchain()
+
             return
 
         # ── Mensagens de controle do Ricart-Agrawala ──
