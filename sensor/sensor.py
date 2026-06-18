@@ -5,6 +5,9 @@ import json
 import sys
 import os
 import sys
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "broker"))
+from blockchain.assinatura import GerenciadorAutenticacao
+
 sys.stdout.reconfigure(line_buffering=True)
 def _parse_addr(env_key, default_host, default_port):
     val = os.getenv(env_key)
@@ -30,6 +33,8 @@ if len(sys.argv) < 2:
     sys.exit(1)
 
 meu_setor = sys.argv[1]
+auth = GerenciadorAutenticacao()
+
 
 while True:
     try:
@@ -45,11 +50,17 @@ while True:
             3: "ataque_concreto"
         }
 
+        ocorrencia = tipos_ocorrencia[prioridade]
+        dados = f"{meu_setor}:{ocorrencia}:{prioridade}"
+        assinatura = auth.assinar(meu_setor, dados)
+
         payload = json.dumps({
-            "ocorrencia": tipos_ocorrencia[prioridade],
+            "ocorrencia": ocorrencia,
             "prioridade": prioridade,
-            "origem": meu_setor
+            "origem": meu_setor,
+            "assinatura": assinatura
         })
+        
         print(f"OCORRÊNCIA: {tipos_ocorrencia[prioridade]}\nPRIORIDADE{prioridade}")
         tcp_socket.sendall(payload.encode())
         tcp_socket.close()
