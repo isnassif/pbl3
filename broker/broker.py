@@ -9,6 +9,7 @@ import os
 import sys
 from blockchain.blockchain import BlockChain
 from blockchain.token import GerenciadorTokens
+from blockchain.assinatura import GerenciadorAutenticacao 
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -44,19 +45,35 @@ PRIORIDADE_LABEL = {1: "BAIXA", 2: "MÉDIA", 3: "ALTA"}
 class Broker:
     def __init__(self, meu_id):
         self.processando_fila = False
+        self.chain_corrompida = False
+        self.auth = GerenciadorAutenticacao()
         self.lock_processamento = threading.Lock()
         self.lock_secao = threading.Lock()
         self.meu_id = meu_id
         self.lock_drones = threading.Lock()
         self.lock_fila = threading.Lock()
+        self.lock_blockchain = threading.Lock() 
         self.drones = {}
         self.fila = []
         self.ra = RicartAgrawala(meu_id, BROKERS, self)
-        self.blockchain = BlockChain()
+        # Caminho de persistência exclusivo por setor
+        # Em Docker usa /data (volume); localmente usa broker/../data/
+        from blockchain.blockchain import _BASE_DIR
+        persist_path = os.path.join(_BASE_DIR, f"{meu_id}_blockchain.json")
+        self.blockchain = BlockChain(persist_path=persist_path)
         self.token = GerenciadorTokens(self.blockchain)
-        # Registra emissões iniciais e minera o genesis block
-        self.token.inicializar_saldos()
-        self.blockchain.criar_genesis()
+
+        # Tenta restaurar chain do disco; só cria genesis se não houver dados salvos
+        restaurada = self.blockchain.carregar_do_disco()
+        if restaurada:
+            # Recalcula saldos em memória a partir dos blocos restaurados
+            self.token.recalcular_saldos()
+            self._log(f"⛓  blockchain restaurada ({len(self.blockchain.chain)} blocos) — saldos recalculados")
+        else:
+            # Primeira execução: emite créditos iniciais e minera o genesis
+            self.token.inicializar_saldos()
+            self.blockchain.criar_genesis()
+            self._log("⛓  nova blockchain iniciada — genesis minerado")
 
     def _broadcast_bloco(self):
         """Envia a chain completa para todos os outros brokers após minerar um bloco."""
@@ -112,6 +129,8 @@ class Broker:
         print(f"  ╚{'═'*62}╝")
         print()
 
+    
+
     def mostrarFila(self, evento="ATUALIZAÇÃO"):
         print()
         print(f"  ┌{'─' * 58}┐")
@@ -156,6 +175,28 @@ class Broker:
                 sock.close()
             except:
                 pass
+
+    def solicitar_transferencia(self, destino, valor):
+        dados = f"{self.meu_id}:{destino}:{valor}"
+        assinatura = self.auth.assinar(self.meu_id, dados)
+
+        msg = {
+            "type": "TRANSFERIR",
+            "de": self.meu_id,
+            "para": destino,
+            "valor": valor,
+            "assinatura": assinatura
+        }
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            sock.connect(BROKERS[destino])
+            sock.sendall(json.dumps(msg).encode())
+            sock.close()
+            self._log(f"transferência solicitada → {destino} ({valor} créditos)")
+        except:
+            self._log(f"falha ao solicitar transferência para {destino}")
 
     def _broadcast_fila(self, req_id, ocorrencia, prioridade, timestamp):
         msg = {
@@ -479,24 +520,6 @@ class Broker:
                         hash_anterior = self.blockchain.hash(bloco_anterior)
                         bloco = self.blockchain.create_block(proof, hash_anterior)
                         self._log(f"laudo gravado → bloco {bloco['index']} | cadeia válida: {self.blockchain.chain_valid(self.blockchain.chain)}")
-                        # TESTE DE ADULTERAÇÃO
-                        if len(self.blockchain.chain) >= 2:
-
-                            print("\n=== TESTE DE ADULTERAÇÃO ===")
-
-                            print(
-                                "Antes:",
-                                self.blockchain.chain_valid(self.blockchain.chain)
-                            )
-
-                            self.blockchain.chain[1]["transacoes"][0]["valor"] = 9999
-
-                            print(
-                                "Depois:",
-                                self.blockchain.chain_valid(self.blockchain.chain)
-                            )
-
-                            print("===========================\n")
                         self._mostrar_blockchain()
                         self._broadcast_bloco()
                     ocorrencia_str = missao["ocorrencia"] if missao else "?"
@@ -566,12 +589,23 @@ class Broker:
             ).start()
 
     def _tratarSensor(self, conn):
+        if self.chain_corrompida == True:
+            self._log("BLOCKCHAIN CORROMPIDA - operação recusada")
+            return
         try:
             data = conn.recv(4096)
             msg = json.loads(data.decode())
             ocorrencia = msg["ocorrencia"]
             prioridade = msg["prioridade"]
             origem = msg.get("origem", self.meu_id)
+            assinatura = msg.get("assinatura", "")
+
+            # ─── VERIFICA A ASSINATURA ANTES DE QUALQUER COISA ────────────────
+            dados = f"{origem}:{ocorrencia}:{prioridade}"
+            if not self.auth.verificar(origem, dados, assinatura):
+                self._log(f"⚠ ASSINATURA INVÁLIDA — pagamento de {origem} rejeitado (possível fraude)")
+                return
+
             req_id = str(uuid.uuid4())
             if prioridade == 1:
                 valor_gasto = 2
@@ -582,28 +616,17 @@ class Broker:
             else:
                 print("Sem prioridade quebrou")
                 return
-            
-            credito_aceito = self.token.gastar(origem, valor_gasto,ocorrencia,req_id)
+
+            credito_aceito = self.token.gastar(origem, valor_gasto, ocorrencia, req_id)
             print("Pendentes:", self.blockchain.transacoes_pendentes)
             if not credito_aceito:
-                self._log(
-                    f"CRÉDITO NEGADO → {origem} sem saldo suficiente"
-                )
+                self._log(f"CRÉDITO NEGADO → {origem} sem saldo suficiente")
                 return
-            bloco_anterior = self.blockchain.print_previous_block()
-
-            proof = self.blockchain.proof_of_work(
-                bloco_anterior['proof']
-            )
-
-            hash_anterior = self.blockchain.hash(
-                bloco_anterior
-            )
-
-            self.blockchain.create_block(
-                proof,
-                hash_anterior
-            )
+            with self.lock_blockchain:
+                bloco_anterior = self.blockchain.print_previous_block()
+                proof = self.blockchain.proof_of_work(bloco_anterior['proof'])
+                hash_anterior = self.blockchain.hash(bloco_anterior)
+                self.blockchain.create_block(proof, hash_anterior)
             self._log(
                 f"CRÉDITO OK → {origem} debitado {valor_gasto} créditos "
                 f"(saldo restante: {self.token.consultar_saldo(origem)}) "
@@ -611,10 +634,7 @@ class Broker:
             )
             self._mostrar_blockchain()
             self._broadcast_bloco()
-            self._log(
-                f"SENSOR → '{ocorrencia}' "
-                f"| P{prioridade} {PRIORIDADE_LABEL[prioridade]}"
-            )
+            self._log(f"SENSOR → '{ocorrencia}' | P{prioridade} {PRIORIDADE_LABEL[prioridade]}")
             threading.Thread(
                 target=self.requisitarDrone,
                 args=(ocorrencia, prioridade),
@@ -624,6 +644,59 @@ class Broker:
             self._log(f"ERRO no sensor: {e}")
         finally:
             conn.close()
+
+
+    def _verificar_integridade(self):
+        while True:
+            time.sleep(10)
+            self._log("checando integridade do disco...")
+
+            try:
+                with open(self.blockchain.persist_path, "r") as f:
+                    dados = json.load(f)
+
+                chain_disco = dados["chain"]
+                valida = self.blockchain.chain_valid(chain_disco)
+                self._log(f"resultado da checagem: {'VÁLIDA' if valida else 'INVÁLIDA'}")
+
+                if not valida:
+                    self.chain_corrompida = True
+                    print()
+                    print(f"  ╔{'═'*56}╗")
+                    print(f"  ║ {'⚠  BLOCKCHAIN CORROMPIDA DETECTADA':^54} ║")
+                    print(f"  ╠{'═'*56}╣")
+                    print(f"  ║  setor : {self.meu_id:<44} ║")
+                    print(f"  ║  ação  : solicitando chain aos peers{' '*16} ║")
+                    print(f"  ╚{'═'*56}╝")
+                    print()
+                    self.solicitar_blockchain()
+                else:
+                    self.chain_corrompida = False
+            except Exception as e:
+                self._log(f"erro verificando chain: {e}")
+
+
+    def solicitar_blockchain(self):
+        msg = {
+        "type": "CHAIN_REQUEST",
+        "broker_id": self.meu_id
+        }
+
+        for broker_id, endereco in BROKERS.items():
+            if broker_id == self.meu_id:
+                continue
+
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                sock.connect(endereco)
+
+                sock.sendall(json.dumps(msg).encode())
+
+                sock.close()
+
+            except:
+                pass   
 
     # ─── INICIALIZAÇÃO ────────────────────────────────────────────────────────
 
@@ -642,6 +715,11 @@ class Broker:
             target=self._syncInicial,
             daemon=True
         ).start()
+
+        threading.Thread(
+        target=self._verificar_integridade,
+        daemon=True
+         ).start()
 
         print()
         print(f"  ┌{'─' * 48}┐")
