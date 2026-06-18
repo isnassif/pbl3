@@ -38,6 +38,23 @@ class GerenciadorTokens:
                 return True
 
             return False
+        
+    def transferir(self, origem, destino, valor):
+        if origem not in self.saldos or destino not in self.saldos:
+            return False
+        with self.lock_token:
+            if valor <= 0 or valor > self.consultar_saldo(origem):
+                return False
+            self.saldos[origem] -= valor
+            self.saldos[destino] += valor
+            self.blockchain.adicionar_transacao({
+                'tipo': 'TRANSFERENCIA',
+                'valor': valor,
+                'de': origem,
+                'para': destino
+            })
+            return True
+    
 
     def consultar_saldo(self, empresa):
         return self.saldos.get(empresa, 0)
@@ -59,26 +76,25 @@ class GerenciadorTokens:
         return True
 
     def recuperar_creditos(self, empresa):
-
         valor_final = 0
-
         for bloco in self.blockchain.chain:
             for transacao in bloco['transacoes']:
+                tipo = transacao.get('tipo')
 
-                if (
-                    transacao['empresa'] == empresa
-                    and transacao['tipo'] == 'EMISSAO'
-                ):
+                if tipo == 'EMISSAO' and transacao.get('empresa') == empresa:
                     valor_final += transacao['valor']
 
-                elif (
-                    transacao['empresa'] == empresa
-                    and transacao['tipo'] == 'PAGAMENTO'
-                ):
+                elif tipo == 'PAGAMENTO' and transacao.get('empresa') == empresa:
                     valor_final -= transacao['valor']
 
+                elif tipo == 'TRANSFERENCIA':
+                    if transacao.get('de') == empresa:
+                        valor_final -= transacao['valor']
+                    if transacao.get('para') == empresa:
+                        valor_final += transacao['valor']
+
         return valor_final
-    
+            
     def inicializar_saldos(self):
         self.emitir_creditos("setor_a", 100)
         self.emitir_creditos("setor_b", 100)
