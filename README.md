@@ -417,28 +417,3 @@ python testes/teste_assinatura.py --rede
 | Ataque de rede com identidade forjada | Rejeitado no broker (confira o log) |
 
 ---
-
-## Estrutura de Arquivos
-
-├── broker/
-│   ├── broker.py               # Lógica principal: fila, despacho, tolerância a falhas
-│   ├── RicartAgrawala.py       # Exclusão mútua distribuída + roteador de mensagens
-│   ├── Dockerfile              # Imagem do broker (inclui blockchain/)
-│   └── blockchain/
-│       ├── blockchain.py       # Cadeia de blocos: PoW, persistência, validação
-│       ├── token.py            # Créditos por setor: emissão, pagamento, transferência
-│       └── assinatura.py       # Autenticação HMAC-SHA256 por setor
-├── drone/
-│   ├── drone.py                # Cliente TCP: recebe missões, reporta conclusão
-│   └── Dockerfile
-├── sensor/
-│   ├── sensor.py               # Gerador de ocorrências aleatórias
-│   └── Dockerfile
-├── testes/
-│   ├── teste_carga.py          # Teste de ordenação por prioridade
-│   ├── teste_consistencia.py   # Teste de replicação da fila entre brokers
-│   ├── teste_falhas.py         # Testes de condições críticas (menu interativo)
-│   └── teste_assinatura.py     # Testes de autenticação HMAC e blockchain
-├── Dockerfile.blockchain       # Imagem isolada para o subsistema blockchain
-└── docker-compose.yml          # Orquestração completa (brokers + drones + sensores)
-```
