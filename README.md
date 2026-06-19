@@ -11,6 +11,7 @@ O sistema simula um cenário de segurança pública em que sensores detectam oco
 - **Broker** — coordena o despacho de drones, mantém a fila de requisições compartilhada, se comunica com os demais brokers para garantir consistência distribuída e gerencia o subsistema de blockchain
 - **Drone** — conecta-se a um broker, aguarda missões e reporta conclusão ou queda
 - **Sensor** — detecta ocorrências aleatórias e as envia ao broker do seu setor
+- **Cliente** — cliente manual interativo que permite enviar ocorrências de qualquer prioridade para um setor escolhido
 
 Cada setor (`setor_a`, `setor_b`, `setor_c`) tem seu próprio broker, drone e sensor. Apesar de independentes, todos compartilham uma fila de requisições distribuída, replicada e consistente entre os três brokers.
 
@@ -146,15 +147,15 @@ Implementa uma blockchain simples com Proof of Work (PoW) e persistência atômi
 
 **Persistência por setor:**
 
-Cada broker grava sua chain em um arquivo separado por setor:
+Cada broker grava sua chain em um arquivo separado por setor, dentro de `broker/data/`:
 
 | Setor | Arquivo |
 |-------|---------|
-| setor_a | `/data/setor_a_blockchain.json` |
-| setor_b | `/data/setor_b_blockchain.json` |
-| setor_c | `/data/setor_c_blockchain.json` |
+| setor_a | `broker/data/setor_a_blockchain.json` |
+| setor_b | `broker/data/setor_b_blockchain.json` |
+| setor_c | `broker/data/setor_c_blockchain.json` |
 
-Em Docker, `/data` deve ser montado como volume para sobreviver a reinicializações do container.
+Em Docker, `broker/data/` deve ser montado como volume para sobreviver a reinicializações do container.
 
 ### `token.py` — Créditos por Setor
 
@@ -194,7 +195,7 @@ Sensor monta a mensagem JSON
         ↓
 Sensor chama assinar(setor, dados) → HMAC-SHA256(chave_setor, dados)
         ↓
-Sensor envia { "tipo": "OCORRENCIA", ..., "assinatura": "<hex>" }
+Sensor envia { "ocorrencia": "...", ..., "assinatura": "<hex>" }
         ↓
 Broker recebe e chama verificar(setor, dados, assinatura_recebida)
         ↓
@@ -223,7 +224,7 @@ sync 3/3 → última rodada de nivelamento
 
 O merge em cada sync é feito por `req_id` — requisições já presentes localmente não são duplicadas. Após os 9 segundos iniciais, o broker está nivelado com os peers e os broadcasts normais mantêm a consistência em tempo real.
 
-**Blockchain na reconexão:** se o arquivo de chain persistido em `/data` for válido, o broker o restaura e recalcula os saldos em memória; se estiver corrompido ou ausente, uma nova chain é iniciada do zero com nova emissão de gênesis.
+**Blockchain na reconexão:** se o arquivo de chain persistido em `broker/data/` for válido, o broker o restaura e recalcula os saldos em memória; se estiver corrompido ou ausente, uma nova chain é iniciada do zero com nova emissão de gênesis.
 
 **Importante:** as requisições **não são removidas da fila** quando um broker cai. Os brokers que ficaram ativos continuam com a fila íntegra e o broker que voltar a recebe completa via sync.
 
@@ -253,17 +254,22 @@ Toda comunicação entre módulos é feita via JSON sobre TCP.
 |------|-------|-----------|
 | `REQUEST` | Broker → Broker | Solicita acesso à seção crítica (Ricart-Agrawala) |
 | `REPLY` | Broker → Broker | Concede acesso ao solicitante |
+| `BROKER_OFFLINE` | Broker → Broker | Notifica queda de um peer; destinatários limpam as requisições daquele broker da fila |
 | `DRONE_UPDATE` | Broker → Broker | Notifica mudança de estado de um drone (livre/ocupado) |
 | `FILA_REQUISICAO` | Broker → Broker | Broadcast de nova requisição adicionada à fila |
 | `FILA_REMOVIDA` | Broker → Broker | Broadcast de requisição atendida (remove por req_id) |
 | `FILA_SYNC_REQUEST` | Broker → Broker | Broker recém-iniciado pede a fila atual |
 | `FILA_SYNC_RESPONSE` | Broker → Broker | Resposta com a fila completa para merge |
 | `EXECUTE` | Broker → Broker | Pede a outro broker que despache um drone remoto |
-| `BLOCKCHAIN_SYNC` | Broker → Broker | Propaga chain completa após minerar novo bloco |
+| `TRANSFERIR` | Broker → Broker | Solicita transferência de créditos entre setores |
+| `CHAIN_REQUEST` | Broker → Broker | Solicita a chain completa de um peer (sincronização de blockchain) |
+| `CHAIN_RESPONSE` | Broker → Broker | Resposta com a chain completa |
+| `BLOCK_NEW` | Broker → Broker | Propaga novo bloco minerado para os peers |
 | `CADASTRO` | Drone → Broker | Drone se registra ao conectar |
 | `DISPATCH` | Broker → Drone | Envia missão ao drone |
 | `CONCLUIDO` | Drone → Broker | Drone informa conclusão da missão |
-| `OCORRENCIA` | Sensor → Broker | Envia ocorrência com assinatura HMAC |
+
+> **Nota:** o sensor não usa um campo `"type"` — ele envia diretamente um payload JSON com os campos `ocorrencia`, `prioridade`, `origem` e `assinatura`.
 
 ---
 
@@ -279,20 +285,23 @@ Toda comunicação entre módulos é feita via JSON sobre TCP.
 Abra um terminal por módulo e suba na ordem: brokers → drones → sensores.
 
 ```bash
-# Brokers
+# Brokers (rodar a partir do diretório broker/)
 python broker.py setor_a
 python broker.py setor_b
 python broker.py setor_c
 
-# Drones
+# Drones (rodar a partir do diretório drone/)
 python drone.py drone_a1
 python drone.py drone_b1
 python drone.py drone_c1
 
-# Sensores
+# Sensores (rodar a partir do diretório sensor/)
 python sensor.py setor_a
 python sensor.py setor_b
 python sensor.py setor_c
+
+# Cliente manual (opcional, rodar a partir do diretório cliente/)
+python cliente.py setor_a
 ```
 
 Os defaults já apontam para `127.0.0.1` — nenhuma variável de ambiente é necessária para rodar localmente.
@@ -319,10 +328,8 @@ python sensor.py setor_a
 
 ### Com Docker
 
-#### Build e push das imagens
-
 ```bash
-# Broker (inclui blockchain internamente)
+# Build das imagens
 docker build -t lucasarguerra/redes2-broker:latest ./broker
 docker build -t lucasarguerra/redes2-drone:latest  ./drone
 docker build -t lucasarguerra/redes2-sensor:latest ./sensor
@@ -331,14 +338,10 @@ docker build -t lucasarguerra/redes2-sensor:latest ./sensor
 docker push lucasarguerra/redes2-broker:latest
 docker push lucasarguerra/redes2-drone:latest
 docker push lucasarguerra/redes2-sensor:latest
-```
 
-#### Rodar individualmente (--network host)
-
-```bash
-# Broker — monte /data como volume para persistir a blockchain entre reinicializações
+# Broker — monte broker/data como volume para persistir a blockchain entre reinicializações
 docker run -d --network host \
-  -v ./data:/data \
+  -v ./broker/data:/app/data \
   -e BROKER_A=<IP_A>:5001 -e BROKER_B=<IP_B>:5002 -e BROKER_C=<IP_C>:5003 \
   lucasarguerra/redes2-broker:latest python broker.py setor_a
 
@@ -353,34 +356,6 @@ docker run -d --network host \
   lucasarguerra/redes2-sensor:latest python sensor.py setor_a
 ```
 
-#### Rodar o subsistema blockchain isolado (testes)
-
-O `Dockerfile.blockchain` agrupa os três módulos (`assinatura`, `token`, `blockchain`) para testes unitários independentes do broker.
-
-```bash
-# Build da imagem de blockchain
-docker build -f Dockerfile.blockchain -t redes2-blockchain:latest ./broker
-
-# Rodar testes de assinatura (padrão)
-docker run --rm redes2-blockchain:latest
-
-# Rodar testes de assinatura com ataque de rede (requer brokers ativos)
-docker run --rm --network host redes2-blockchain:latest \
-  python testes/teste_assinatura.py --rede
-
-# Inspecionar a chain de um setor (volume compartilhado com o broker)
-docker run --rm -v ./data:/data redes2-blockchain:latest \
-  python -c "
-import json
-with open('/data/setor_a_blockchain.json') as f:
-    chain = json.load(f)
-for b in chain['chain']:
-    print(f'Bloco {b[\"index\"]} — {len(b[\"transacoes\"])} transações')
-"
-```
-
-> **Volume `/data`:** para que o container de blockchain leia a chain gravada pelo broker, monte o mesmo diretório local com `-v ./data:/data` em ambos os containers.
-
 Para ver os logs de um container rodando em background:
 
 ```bash
@@ -392,40 +367,27 @@ docker ps  # lista containers ativos e seus IDs
 
 ## Testes
 
-A pasta `testes/` contém scripts para validar o sistema sob diferentes condições.
+A pasta `testes/` contém scripts para validar o sistema sob diferentes condições. Os brokers precisam estar rodando antes de executar qualquer teste que envolva rede.
 
-### `teste_carga.py` — ordenação da fila
+### `teste.py` — suite de testes unitários e de integração
 
-Envia N requisições em ordem aleatória para setores aleatórios e imprime a ordem esperada na fila para comparação visual com os brokers.
-
-```bash
-python teste_carga.py 20
-```
-
-### `teste_consistencia.py` — consistência entre brokers
-
-Envia N requisições, aguarda propagação e imprime a distribuição esperada por prioridade para verificação manual nos terminais dos três brokers.
+Suite completa com `unittest` que cobre os principais critérios do sistema.
 
 ```bash
-python teste_consistencia.py 15
+python testes/teste.py
 ```
 
-### `teste_falhas.py` — condições críticas (menu interativo)
+| Classe de teste | O que verifica |
+|-----------------|----------------|
+| `CriterioArquitetura` | Conectividade e estrutura do cluster de brokers |
+| `CriterioComunicacao` | Troca de mensagens entre brokers |
+| `CriterioGestaoDeAtivos` | Emissão, gasto e saldo de créditos via blockchain |
+| `CriterioPrevencaoDuploGasto` | Rejeição de operações com saldo insuficiente |
+| `CriterioRequisicaoEPagamento` | Fluxo completo de ocorrência → despacho → pagamento |
+| `CriterioLogImutavel` | Integridade e imutabilidade da chain |
+| `CriterioTransparencia` | Consulta e auditabilidade das transações gravadas |
 
-```bash
-python teste_falhas.py
-```
-
-Oferece quatro cenários:
-
-| Cenário | O que testa |
-|---------|-------------|
-| Rajada concorrente | Exclusão mútua sob alta concorrência — todas as requisições disparadas ao mesmo tempo |
-| Durante reconexão de broker | Consistência da fila após queda e retorno de um broker |
-| Queda de drone durante missão | Recuperação de requisição quando drone cai no meio da missão |
-| Stress test em ondas | Carga contínua em múltiplas ondas para avaliar estabilidade |
-
-### `teste_assinatura.py` — autenticação HMAC e blockchain
+### `teste_assinatura.py` — autenticação HMAC
 
 Valida o `GerenciadorAutenticacao` em dois modos:
 
@@ -445,6 +407,22 @@ python testes/teste_assinatura.py --rede
 | Mensagem adulterada após assinatura | ❌ Assinatura inválida |
 | Ataque de rede com identidade forjada | Rejeitado no broker (confira o log) |
 
+### `teste_duplogasto.py` — prevenção de duplo gasto (menu interativo)
+
+Permite configurar setor alvo, prioridade e número de requisições para simular tentativas de gastar mais créditos do que o saldo disponível.
+
+```bash
+python testes/teste_duplogasto.py
+```
+
+### `teste_setormalicioso.py` — setor malicioso e resiliência (menu interativo)
+
+Manipula diretamente os arquivos `{setor}_blockchain.json` em disco, simulando adulteração externa da chain, e guia cenários que exigem derrubar e subir brokers manualmente para verificar a detecção de corrupção.
+
+```bash
+python testes/teste_setormalicioso.py
+```
+
 ---
 
 ## Estrutura de Arquivos
@@ -454,11 +432,18 @@ python testes/teste_assinatura.py --rede
 ├── broker/
 │   ├── broker.py               # Lógica principal: fila, despacho, tolerância a falhas
 │   ├── RicartAgrawala.py       # Exclusão mútua distribuída + roteador de mensagens
-│   ├── Dockerfile              # Imagem do broker (inclui blockchain/)
+│   ├── Dockerfile
+│   ├── data/                   # Chain persistida por setor (gerada em execução)
+│   │   ├── setor_a_blockchain.json
+│   │   ├── setor_b_blockchain.json
+│   │   └── setor_c_blockchain.json
 │   └── blockchain/
 │       ├── blockchain.py       # Cadeia de blocos: PoW, persistência, validação
 │       ├── token.py            # Créditos por setor: emissão, pagamento, transferência
 │       └── assinatura.py       # Autenticação HMAC-SHA256 por setor
+├── cliente/
+│   ├── cliente.py              # Cliente manual interativo para envio de ocorrências
+│   └── Dockerfile
 ├── drone/
 │   ├── drone.py                # Cliente TCP: recebe missões, reporta conclusão
 │   └── Dockerfile
@@ -466,10 +451,9 @@ python testes/teste_assinatura.py --rede
 │   ├── sensor.py               # Gerador de ocorrências aleatórias
 │   └── Dockerfile
 ├── testes/
-│   ├── teste_carga.py          # Teste de ordenação por prioridade
-│   ├── teste_consistencia.py   # Teste de replicação da fila entre brokers
-│   ├── teste_falhas.py         # Testes de condições críticas (menu interativo)
-│   └── teste_assinatura.py     # Testes de autenticação HMAC e blockchain
-├── Dockerfile.blockchain       # Imagem isolada para o subsistema blockchain
+│   ├── teste.py                # Suite unittest: arquitetura, comunicação, blockchain
+│   ├── teste_assinatura.py     # Testes de autenticação HMAC (isolado e via rede)
+│   ├── teste_duplogasto.py     # Prevenção de duplo gasto (menu interativo)
+│   └── teste_setormalicioso.py # Setor malicioso e resiliência a quedas (menu interativo)
 └── docker-compose.yml          # Orquestração completa (brokers + drones + sensores)
 ```
